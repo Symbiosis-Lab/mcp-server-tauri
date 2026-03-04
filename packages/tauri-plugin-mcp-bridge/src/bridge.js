@@ -66,12 +66,9 @@
                   try {
                      return JSON.stringify(a);
                   } catch(_) {
-                     // Circular reference or non-serializable (e.g. null-prototype object)
-                     try {
-                        return String(a);
-                     } catch(_) {
-                        return '[non-serializable]';
-                     }
+                     // JSON.stringify fails on circular references or null-prototype objects.
+                     // Values cannot be serialized — listing keys only.
+                     return '[non-serializable, keys only: ' + Object.keys(a).join(', ') + ']';
                   }
                })
                .join(' ');
