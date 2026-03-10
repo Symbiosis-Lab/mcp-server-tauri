@@ -29,6 +29,7 @@
     "LICENSE",
     "skills",
     "!skills/_artifacts",
+    ".claude-plugin",
     "bin"
   ],
   "author": "hypothesi",
