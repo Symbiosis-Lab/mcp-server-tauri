@@ -30,6 +30,8 @@
     "skills",
     "!skills/_artifacts",
     ".claude-plugin",
+    "gemini-extension.json",
+    "GEMINI.md",
     "bin"
   ],
   "author": "hypothesi",
