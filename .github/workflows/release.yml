@@ -148,7 +148,9 @@ jobs:
 
       - name: Test CLI
         run: |
-          npm run test --workspace=@hypothesi/tauri-mcp-cli
+          cd packages/cli
+          npm run test
+          cd ../..
           npx tsc --noEmit --project packages/cli/tsconfig.json
 
       - name: Validate agent skills
