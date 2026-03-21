@@ -66,12 +66,16 @@ This monorepo uses a **single version** across all packages. All packages share 
 **Version files (all must have the same version):**
 
 - `packages/mcp-server/package.json` - `version` field
+- `packages/cli/package.json` - `version` field and `@hypothesi/tauri-mcp-server` dependency version
+- `packages/cli/.claude-plugin/plugin.json` - `version` field
+- `gemini-extension.json` - `version` field
 - `packages/tauri-plugin-mcp-bridge/package.json` - `version` field
 - `packages/tauri-plugin-mcp-bridge/Cargo.toml` - `version` field
 
-**Changelog files (all three must be updated):**
+**Changelog files (all four must be updated):**
 
 - `CHANGELOG.md` - Root changelog for overall project history
+- `packages/cli/CHANGELOG.md` - CLI-specific changes
 - `packages/mcp-server/CHANGELOG.md` - Server-specific changes
 - `packages/tauri-plugin-mcp-bridge/CHANGELOG.md` - Plugin-specific changes
 
@@ -85,30 +89,41 @@ This monorepo uses a **single version** across all packages. All packages share 
 
 1. **Review git log** to identify changes since the last release tag
 2. **Determine version bump** (patch for fixes, minor for features, major for breaking)
-3. **Update all three changelogs** with the new version entry:
+3. **Update all four changelogs** with the new version entry:
    - Add entry under `## [Unreleased]` with the new version and date
    - Include changes relevant to each package (use `_No changes to this package._` if none)
    - **Do not skip any version numbers** - if v0.2.1 exists, the next must be v0.2.2, not v0.2.3
 4. **Update version in package.json files** using npm (without git tag):
    ```bash
-   npm version <version> --no-git-tag-version -w @hypothesi/tauri-mcp-server -w @hypothesi/tauri-plugin-mcp-bridge
+   npm version <version> --no-git-tag-version -w @hypothesi/tauri-mcp-server -w @hypothesi/tauri-mcp-cli -w @hypothesi/tauri-plugin-mcp-bridge
    ```
-5. **Update Cargo.toml version** manually to match
+5. **Update version-coupled metadata** manually to match:
+   - `packages/cli/package.json` - update the `@hypothesi/tauri-mcp-server` dependency version
+   - `packages/cli/.claude-plugin/plugin.json`
+   - `gemini-extension.json`
+   - `packages/tauri-plugin-mcp-bridge/Cargo.toml`
 6. **Update lock files**:
    ```bash
    npm install
    cargo update --package tauri-plugin-mcp-bridge  # in packages/tauri-plugin-mcp-bridge/
    cargo update --package tauri-plugin-mcp-bridge  # in packages/test-app/src-tauri/
    ```
-7. **Verify versions** in lock files match the new version:
+7. **Verify versions** in manifests and lock files match the new version:
    ```bash
+   grep -n '"version"' packages/cli/.claude-plugin/plugin.json gemini-extension.json
+   grep -n '"@hypothesi/tauri-mcp-server"' packages/cli/package.json
    grep -A2 '"@hypothesi/tauri-mcp-server"' package-lock.json | head -3
+   grep -A2 '"@hypothesi/tauri-mcp-cli"' package-lock.json | head -3
    grep -A2 '"@hypothesi/tauri-plugin-mcp-bridge"' package-lock.json | head -3
    ```
 8. **Stage all changed files**:
-   - All three changelogs
-   - Both package.json files
-   - Cargo.toml
+   - All four changelogs
+   - `packages/mcp-server/package.json`
+   - `packages/cli/package.json`
+   - `packages/cli/.claude-plugin/plugin.json`
+   - `gemini-extension.json`
+   - `packages/tauri-plugin-mcp-bridge/package.json`
+   - `packages/tauri-plugin-mcp-bridge/Cargo.toml`
    - package-lock.json
    - Both Cargo.lock files
 9. **Commit**: `git commit -m "chore: version bump: v<version>"`
@@ -117,8 +132,9 @@ This monorepo uses a **single version** across all packages. All packages share 
 
 ### Common Mistakes to Avoid
 
-- **Skipping changelog entries**: Every version must have an entry in all three changelogs
+- **Skipping changelog entries**: Every version must have an entry in all four changelogs
 - **Forgetting lock files**: Both `package-lock.json` and both `Cargo.lock` files must be updated
+- **Forgetting CLI metadata**: `packages/cli/.claude-plugin/plugin.json`, `gemini-extension.json`, and the CLI's pinned `@hypothesi/tauri-mcp-server` dependency must match the release version
 - **Version mismatch**: All version fields must match exactly
 - **Missing intermediate versions**: If changelogs are missing entries for previous versions, add them before creating the new release
 
