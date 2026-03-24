@@ -36,6 +36,21 @@ pub async fn list_windows<R: Runtime>(app: AppHandle<R>) -> Result<Value, String
     let mut window_list: Vec<WindowInfo> = Vec::new();
     let mut seen_labels = std::collections::HashSet::new();
 
+    // Debug: log what's available
+    let ww_count = app.webview_windows().len();
+    let wv_count = app.webviews().len();
+    let w_count = app.windows().len();
+    eprintln!("[MCP][LIST_WINDOWS] webview_windows={ww_count}, webviews={wv_count}, windows={w_count}");
+    for (label, _) in app.webview_windows().iter() {
+        eprintln!("[MCP][LIST_WINDOWS]   webview_window: {label}");
+    }
+    for (label, _) in app.webviews().iter() {
+        eprintln!("[MCP][LIST_WINDOWS]   webview: {label}");
+    }
+    for (label, _) in app.windows().iter() {
+        eprintln!("[MCP][LIST_WINDOWS]   window: {label}");
+    }
+
     // First: enumerate WebviewWindow instances (combined window+webview)
     for (label, window) in app.webview_windows().iter() {
         let title = window.title().ok();
