@@ -218,19 +218,27 @@ pub async fn execute_js_in_resolved<R: Runtime>(
 
 /// Prepare script for native `evaluateJavaScript` on macOS.
 ///
-/// WKWebView's evaluateJavaScript returns ObjC-bridged types. Complex JS
-/// objects (arrays, dicts) become NSDictionary/NSArray whose `description()`
-/// is plist-like, not JSON. To guarantee correct serialization, we wrap
-/// the user's script so it always returns a JSON string.
+/// WKWebView's evaluateJavaScript returns ObjC-bridged types:
+/// - Strings → NSString (description works)
+/// - Numbers → NSNumber (description works)
+/// - Objects/Arrays → NSDictionary/NSArray (description is plist-like, NOT JSON)
 ///
-/// Important: the wrapper must be synchronous. WKWebView's evaluateJavaScript
-/// does NOT await Promises — it returns the Promise object itself. Use a
-/// synchronous IIFE with try/catch.
+/// Strategy:
+/// - Scripts that are IIFEs (start with `(`) are left as-is. The Node MCP
+///   server's internal scripts are IIFEs that handle their own serialization.
+/// - Other scripts get wrapped in a JSON.stringify IIFE to ensure the result
+///   is always an NSString containing valid JSON.
 #[cfg(target_os = "macos")]
 fn prepare_script_for_native(script: &str) -> String {
     let trimmed = script.trim();
 
-    // Detect if the script is a single expression or multi-statement
+    // IIFEs are already self-contained — don't wrap them.
+    // This avoids double-serialization of the Node MCP server's internal scripts.
+    if trimmed.starts_with('(') {
+        return trimmed.to_string();
+    }
+
+    // For everything else: wrap in a JSON.stringify IIFE
     let has_real_semicolons = if let Some(without_trailing) = trimmed.strip_suffix(';') {
         without_trailing.contains(';')
     } else {
@@ -248,20 +256,11 @@ fn prepare_script_for_native(script: &str) -> String {
         || trimmed.starts_with("try ")
         || trimmed.starts_with("return ");
 
-    // For single expressions, add "return" so the IIFE returns the value.
-    // For multi-statement scripts, add "return" before the last statement.
     let body = if is_multi_statement {
-        // Find the last semicolon-terminated statement and prepend "return" to the
-        // final expression. This handles scripts like:
-        //   var el = document.querySelector('body'); el.textContent
-        // → var el = document.querySelector('body'); return el.textContent
         if let Some(last_semi_pos) = trimmed.rfind(';') {
             let (prefix, last_part) = trimmed.split_at(last_semi_pos + 1);
             let last_part = last_part.trim();
-            if last_part.is_empty() {
-                // Trailing semicolon, try the statement before it
-                trimmed.to_string()
-            } else if last_part.starts_with("return ") {
+            if last_part.is_empty() || last_part.starts_with("return ") {
                 trimmed.to_string()
             } else {
                 format!("{prefix} return {last_part}")
@@ -273,15 +272,11 @@ fn prepare_script_for_native(script: &str) -> String {
         format!("return {trimmed}")
     };
 
-    // Synchronous IIFE that JSON.stringify's the result.
     format!(
         r#"(function() {{
             try {{
-                var __result = (function() {{ {body} }})();
-                if (__result !== undefined && __result !== null && typeof __result.then === 'function') {{
-                    return JSON.stringify({{ __error: "Async scripts not supported in native eval. Wrap with await." }});
-                }}
-                return JSON.stringify(__result === undefined ? null : __result);
+                var __r = (function() {{ {body} }})();
+                return JSON.stringify(__r === undefined ? null : __r);
             }} catch (e) {{
                 return JSON.stringify({{ __error: e.message || String(e) }});
             }}
