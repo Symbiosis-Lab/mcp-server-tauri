@@ -117,15 +117,25 @@ pub fn resolve_window_with_context<R: Runtime>(
     let windows = app.webview_windows();
     let total_windows = windows.len();
     let explicit_label = label.is_some();
-    let target_label = label.unwrap_or_else(|| "main".to_string());
+    let target_label = label.clone().unwrap_or_else(|| "main".to_string());
 
-    let window = app
-        .get_webview_window(&target_label)
-        .ok_or_else(|| format!("Window '{target_label}' not found"))?;
+    // Try explicit or default label first
+    let (window, actual_label) = if let Some(w) = app.get_webview_window(&target_label) {
+        (w, target_label)
+    } else if !explicit_label {
+        // No "main" window — fall back to first available
+        let (lbl, w) = windows
+            .iter()
+            .next()
+            .ok_or_else(|| "No windows available".to_string())?;
+        (w.clone(), lbl.clone())
+    } else {
+        return Err(format!("Window '{target_label}' not found"));
+    };
 
     let warning = if !explicit_label && total_windows > 1 {
         Some(format!(
-            "Multiple windows detected ({total_windows} total). Defaulting to 'main' window. \
+            "Multiple windows detected ({total_windows} total). Using '{actual_label}' window. \
              Use windowId parameter to target a specific window. \
              Available windows: {}",
             windows.keys().cloned().collect::<Vec<_>>().join(", ")
@@ -137,7 +147,7 @@ pub fn resolve_window_with_context<R: Runtime>(
     Ok(ResolvedWindow {
         window,
         context: WindowContext {
-            window_label: target_label,
+            window_label: actual_label,
             total_windows,
             warning,
         },
@@ -160,7 +170,20 @@ pub fn resolve_window<R: Runtime>(
     app: &AppHandle<R>,
     label: Option<String>,
 ) -> Result<tauri::WebviewWindow<R>, String> {
-    let label = label.unwrap_or_else(|| "main".to_string());
-    app.get_webview_window(&label)
-        .ok_or_else(|| format!("Window '{label}' not found"))
+    let explicit = label.is_some();
+    let target = label.unwrap_or_else(|| "main".to_string());
+
+    // Try explicit or default label first
+    if let Some(w) = app.get_webview_window(&target) {
+        return Ok(w);
+    }
+
+    // No "main" window — fall back to first available (only when no explicit label)
+    if !explicit {
+        if let Some((_, w)) = app.webview_windows().iter().next() {
+            return Ok(w.clone());
+        }
+    }
+
+    Err(format!("Window '{target}' not found"))
 }

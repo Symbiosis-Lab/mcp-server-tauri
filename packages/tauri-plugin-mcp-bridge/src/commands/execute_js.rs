@@ -1,15 +1,22 @@
 //! JavaScript execution in webview.
 
 use super::script_executor::ScriptExecutor;
+#[cfg(not(target_os = "macos"))]
 use crate::logging::mcp_log_error;
 use serde_json::Value;
-use tauri::{command, Listener, Runtime, State, WebviewWindow};
+#[cfg(not(target_os = "macos"))]
+use tauri::Listener;
+use tauri::{command, Runtime, State, WebviewWindow};
+#[cfg(not(target_os = "macos"))]
 use tokio::sync::oneshot;
+#[cfg(not(target_os = "macos"))]
 use uuid::Uuid;
 
 /// Executes JavaScript code in the webview context.
 ///
-/// This command evaluates arbitrary JavaScript in the webview and returns the result.
+/// On macOS, uses native `WKWebView.evaluateJavaScript:completionHandler:` for
+/// reliable result delivery. On other platforms, falls back to `window.eval()` +
+/// Tauri event roundtrip.
 ///
 /// # Arguments
 ///
@@ -20,21 +27,156 @@ use uuid::Uuid;
 ///
 /// * `Ok(Value)` - JSON object containing:
 ///   - `success`: Whether execution succeeded
-///   - `result`: The result of the script execution (if successful)
+///   - `data`: The result of the script execution (if successful)
 ///   - `error`: Error message (if failed)
-///
-/// # Examples
-///
-/// ```typescript
-/// import { invoke } from '@tauri-apps/api/core';
-///
-/// const result = await invoke('plugin:mcp-bridge|execute_js', {
-///   script: 'document.title'
-/// });
-/// console.log(result.result); // Page title
-/// ```
 #[command]
 pub async fn execute_js<R: Runtime>(
+    window: WebviewWindow<R>,
+    script: String,
+    _state: State<'_, ScriptExecutor>,
+) -> Result<Value, String> {
+    #[cfg(target_os = "macos")]
+    {
+        execute_js_native_macos(&window, &script).await
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        execute_js_event_roundtrip(window, script, state).await
+    }
+}
+
+/// macOS: Use native WKWebView.evaluateJavaScript for reliable JS execution.
+///
+/// The eval+event approach fails on macOS because scripts injected via
+/// `window.eval()` run in a context where `window.__TAURI__.event.emit()`
+/// doesn't reach the Rust listener. Using the native completion handler
+/// sidesteps this entirely.
+#[cfg(target_os = "macos")]
+async fn execute_js_native_macos<R: Runtime>(
+    window: &WebviewWindow<R>,
+    script: &str,
+) -> Result<Value, String> {
+    use block2::RcBlock;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSError, NSString};
+    use objc2_web_kit::WKWebView;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+
+    let prepared = prepare_script_for_native(script);
+    let (tx, rx) = mpsc::channel::<Result<Value, String>>();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+
+    window
+        .with_webview(move |webview| {
+            unsafe {
+                let wkwebview: &WKWebView = &*(webview.inner() as *const _ as *const WKWebView);
+                let ns_script = NSString::from_str(&prepared);
+
+                let tx_clone = tx.clone();
+                let handler =
+                    RcBlock::new(move |result: *mut AnyObject, error: *mut NSError| {
+                        if let Some(tx) = tx_clone.lock().unwrap().take() {
+                            if !error.is_null() {
+                                let err = &*error;
+                                let desc = err.localizedDescription();
+                                let _ = tx.send(Err(desc.to_string()));
+                            } else if !result.is_null() {
+                                // The result is a JavaScript value bridged to ObjC.
+                                // NSString for strings, NSNumber for numbers/booleans, etc.
+                                // We convert via description → JSON parse.
+                                let obj = &*result;
+                                let desc_ns: *mut NSString =
+                                    objc2::msg_send![obj, description];
+                                if !desc_ns.is_null() {
+                                    let desc_str = (&*desc_ns).to_string();
+                                    // Try to parse as JSON first, fall back to string
+                                    let val = serde_json::from_str(&desc_str)
+                                        .unwrap_or_else(|_| Value::String(desc_str));
+                                    let _ = tx.send(Ok(val));
+                                } else {
+                                    let _ = tx.send(Ok(Value::Null));
+                                }
+                            } else {
+                                let _ = tx.send(Ok(Value::Null));
+                            }
+                        }
+                    });
+
+                wkwebview
+                    .evaluateJavaScript_completionHandler(
+                        &ns_script,
+                        Some(&handler),
+                    );
+            }
+        })
+        .map_err(|e| format!("Failed to access webview: {e}"))?;
+
+    // Wait for result with timeout
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(Ok(data)) => Ok(serde_json::json!({
+            "success": true,
+            "data": data
+        })),
+        Ok(Err(error)) => Ok(serde_json::json!({
+            "success": false,
+            "error": error
+        })),
+        Err(_) => Ok(serde_json::json!({
+            "success": false,
+            "error": "Script execution timeout (10s)"
+        })),
+    }
+}
+
+/// Prepare script for native execution.
+///
+/// Native `evaluateJavaScript` returns the last expression's value directly,
+/// so we wrap multi-statement scripts in an IIFE and ensure single expressions
+/// are returned properly.
+#[cfg(target_os = "macos")]
+fn prepare_script_for_native(script: &str) -> String {
+    let trimmed = script.trim();
+
+    // If already wrapped in IIFE or is a simple expression, use as-is
+    if trimmed.starts_with("(function")
+        || trimmed.starts_with("(async")
+        || trimmed.starts_with("(() =>")
+    {
+        return trimmed.to_string();
+    }
+
+    // Multi-statement scripts need IIFE wrapping
+    let has_real_semicolons = if let Some(without_trailing) = trimmed.strip_suffix(';') {
+        without_trailing.contains(';')
+    } else {
+        trimmed.contains(';')
+    };
+
+    let is_multi_statement = has_real_semicolons
+        || trimmed.starts_with("const ")
+        || trimmed.starts_with("let ")
+        || trimmed.starts_with("var ")
+        || trimmed.starts_with("if ")
+        || trimmed.starts_with("for ")
+        || trimmed.starts_with("while ")
+        || trimmed.starts_with("function ")
+        || trimmed.starts_with("class ")
+        || trimmed.starts_with("try ");
+
+    if is_multi_statement {
+        // Wrap in async IIFE so await works
+        format!("(async () => {{ {trimmed} }})()")
+    } else {
+        // Single expression — evaluateJavaScript returns its value directly
+        trimmed.to_string()
+    }
+}
+
+/// Fallback: eval + event roundtrip (works on non-macOS platforms).
+#[cfg(not(target_os = "macos"))]
+async fn execute_js_event_roundtrip<R: Runtime>(
     window: WebviewWindow<R>,
     script: String,
     state: State<'_, ScriptExecutor>,
@@ -107,11 +249,9 @@ pub async fn execute_js<R: Runtime>(
     let prepared_script = prepare_script(&script);
 
     // Create wrapped script that uses event emission for result communication
-    // We use a double-wrapped approach to catch both parse and runtime errors
     let wrapped_script = format!(
         r#"
         (function() {{
-            // Helper to send result back - checks for __TAURI__ availability
             function __sendResult(success, data, error) {{
                 try {{
                     if (window.__TAURI__ && window.__TAURI__.event) {{
@@ -129,23 +269,17 @@ pub async fn execute_js<R: Runtime>(
                 }}
             }}
 
-            // Execute the user script
             (async () => {{
                 try {{
-                    // Create function to execute user script
                     const __executeScript = async () => {{
                         {prepared_script}
                     }};
-
-                    // Execute and get result
                     const __result = await __executeScript();
-
                     __sendResult(true, __result !== undefined ? __result : null, null);
                 }} catch (error) {{
                     __sendResult(false, null, error.message || String(error));
                 }}
             }})().catch(function(error) {{
-                // Catch any unhandled promise rejections
                 __sendResult(false, null, error.message || String(error));
             }});
         }})();
@@ -154,7 +288,6 @@ pub async fn execute_js<R: Runtime>(
 
     // Execute the wrapped script
     if let Err(e) = window.eval(&wrapped_script) {
-        // Clean up pending result on error
         let mut pending = state.pending_results.lock().await;
         pending.remove(&exec_id);
 
@@ -167,18 +300,13 @@ pub async fn execute_js<R: Runtime>(
     // Wait for result with timeout
     let result = match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
         Ok(Ok(result)) => Ok(result),
-        Ok(Err(_)) => {
-            // Channel was dropped
-            Ok(serde_json::json!({
-                "success": false,
-                "error": "Script execution failed: channel closed"
-            }))
-        }
+        Ok(Err(_)) => Ok(serde_json::json!({
+            "success": false,
+            "error": "Script execution failed: channel closed"
+        })),
         Err(_) => {
-            // Timeout - clean up pending result
             let mut pending = state.pending_results.lock().await;
             pending.remove(&exec_id);
-
             Ok(serde_json::json!({
                 "success": false,
                 "error": "Script execution timeout"
@@ -186,18 +314,16 @@ pub async fn execute_js<R: Runtime>(
         }
     };
 
-    // Clean up event listener
     window.unlisten(unlisten);
-
     result
 }
 
-/// Prepare script by adding return statement if needed.
+/// Prepare script by adding return statement if needed (for event roundtrip path).
+#[cfg(not(target_os = "macos"))]
 fn prepare_script(script: &str) -> String {
     let trimmed = script.trim();
     let needs_return = !trimmed.starts_with("return ");
 
-    // Check if it's a multi-statement script
     let has_real_semicolons = if let Some(without_trailing) = trimmed.strip_suffix(';') {
         without_trailing.contains(';')
     } else {
@@ -215,7 +341,6 @@ fn prepare_script(script: &str) -> String {
         || trimmed.starts_with("class ")
         || trimmed.starts_with("try ");
 
-    // Single expression patterns
     let is_single_expression = trimmed.starts_with("await ")
         || trimmed.starts_with("(")
         || trimmed.starts_with("JSON.")
