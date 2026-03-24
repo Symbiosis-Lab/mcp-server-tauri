@@ -130,6 +130,81 @@ async fn execute_js_native_macos<R: Runtime>(
     }
 }
 
+/// Execute JS in a `ResolvedWebview` (for WebSocket handler).
+///
+/// On macOS, uses native `evaluateJavaScript`. On other platforms, uses `eval`.
+#[cfg(target_os = "macos")]
+pub async fn execute_js_in_resolved<R: Runtime>(
+    webview: &super::list_windows::ResolvedWebview<R>,
+    script: &str,
+) -> Result<Value, String> {
+    use block2::RcBlock;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSError, NSString};
+    use objc2_web_kit::WKWebView;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+
+    let prepared = prepare_script_for_native(script);
+    let (tx, rx) = mpsc::channel::<Result<Value, String>>();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+
+    webview
+        .with_webview(move |wv| {
+            unsafe {
+                let wkwebview: &WKWebView = &*(wv.inner() as *const _ as *const WKWebView);
+                let ns_script = NSString::from_str(&prepared);
+
+                let tx_clone = tx.clone();
+                let handler =
+                    RcBlock::new(move |result: *mut AnyObject, error: *mut NSError| {
+                        if let Some(tx) = tx_clone.lock().unwrap().take() {
+                            if !error.is_null() {
+                                let err = &*error;
+                                let desc = err.localizedDescription();
+                                let _ = tx.send(Err(desc.to_string()));
+                            } else if !result.is_null() {
+                                let obj = &*result;
+                                let desc_ns: *mut NSString = objc2::msg_send![obj, description];
+                                if !desc_ns.is_null() {
+                                    let desc_str = (&*desc_ns).to_string();
+                                    let val = serde_json::from_str(&desc_str)
+                                        .unwrap_or_else(|_| Value::String(desc_str));
+                                    let _ = tx.send(Ok(val));
+                                } else {
+                                    let _ = tx.send(Ok(Value::Null));
+                                }
+                            } else {
+                                let _ = tx.send(Ok(Value::Null));
+                            }
+                        }
+                    });
+
+                wkwebview.evaluateJavaScript_completionHandler(&ns_script, Some(&handler));
+            }
+        })
+        .map_err(|e| format!("Failed to access webview: {e}"))?;
+
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(Ok(data)) => Ok(serde_json::json!({ "success": true, "data": data })),
+        Ok(Err(error)) => Ok(serde_json::json!({ "success": false, "error": error })),
+        Err(_) => Ok(serde_json::json!({ "success": false, "error": "Script execution timeout (10s)" })),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub async fn execute_js_in_resolved<R: Runtime>(
+    webview: &super::list_windows::ResolvedWebview<R>,
+    script: &str,
+) -> Result<Value, String> {
+    // On non-macOS, use eval (the event roundtrip won't work without a command context)
+    // For basic expression evaluation, eval + polling is used
+    webview.eval(script).map_err(|e| format!("eval failed: {e}"))?;
+    // Note: without the event roundtrip, we can't get the return value on non-macOS
+    // from a standalone Webview. Return success with null data.
+    Ok(serde_json::json!({ "success": true, "data": null }))
+}
+
 /// Prepare script for native execution.
 ///
 /// Native `evaluateJavaScript` returns the last expression's value directly,

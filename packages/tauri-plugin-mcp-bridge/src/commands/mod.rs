@@ -25,11 +25,11 @@ pub use script_executor::ScriptExecutor;
 pub use backend_state::get_backend_state;
 pub use emit_event::emit_event;
 pub use execute_command::execute_command;
-pub use execute_js::execute_js;
+pub use execute_js::{execute_js, execute_js_in_resolved};
 pub use ipc_monitor::{get_ipc_events, report_ipc_event, start_ipc_monitor, stop_ipc_monitor};
 pub use list_windows::{
-    list_windows, resolve_window, resolve_window_with_context, ResolvedWindow, WindowContext,
-    WindowInfo,
+    list_windows, resolve_window, resolve_window_with_context, ResolvedWebview, ResolvedWindow,
+    WindowContext, WindowInfo,
 };
 pub use resize_window::{resize_window, ResizeWindowParams, ResizeWindowResult};
 pub use screenshot::capture_native_screenshot;

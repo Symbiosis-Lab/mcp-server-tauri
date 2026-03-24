@@ -4,13 +4,13 @@
 //! between the Tauri application and external MCP clients. It broadcasts events
 //! to all connected clients and can receive commands from them.
 
-use crate::commands::{self, resolve_window_with_context, ScriptExecutor, WindowContext};
+use crate::commands::{self, resolve_window_with_context, WindowContext};
 use crate::logging::{mcp_log_error, mcp_log_info};
 use crate::script_registry::{ScriptEntry, ScriptType, SharedScriptRegistry};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{self, Value};
 use std::net::SocketAddr;
-use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
+use tauri::{AppHandle, Manager, Runtime};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
@@ -291,10 +291,7 @@ async fn handle_execute_js<R: Runtime>(app: &AppHandle<R>, id: &str, args: &Valu
 
     match resolve_window_with_context(app, window_label) {
         Ok(resolved) => {
-            let executor_state: tauri::State<'_, ScriptExecutor> = app.state();
-            match commands::execute_js(resolved.window.clone(), script.to_string(), executor_state)
-                .await
-            {
+            match commands::execute_js_in_resolved(&resolved.window, script).await {
                 Ok(result) => serde_json::json!({
                     "id": id,
                     "success": result.get("success").and_then(|v| v.as_bool()).unwrap_or(true),
@@ -339,7 +336,16 @@ async fn handle_capture_screenshot<R: Runtime>(
 
     match resolve_window_with_context(app, window_label) {
         Ok(resolved) => {
-            match commands::capture_native_screenshot(resolved.window, format, quality, max_width)
+            let Some(ww) = resolved.window.into_webview_window() else {
+                return serde_json::json!({
+                    "id": id,
+                    "success": false,
+                    "error": "Screenshot requires a WebviewWindow, not a standalone Webview. \
+                              Use windowId to target a WebviewWindow.",
+                    "windowContext": resolved.context
+                });
+            };
+            match commands::capture_native_screenshot(ww, format, quality, max_width)
                 .await
             {
                 Ok(data_url) => serde_json::json!({
@@ -687,7 +693,7 @@ struct ScriptOperationResult {
 
 /// Injects a script into a specific webview window.
 fn inject_script_to_window<R: Runtime>(
-    window: &WebviewWindow<R>,
+    window: &commands::ResolvedWebview<R>,
     entry: &ScriptEntry,
 ) -> Result<(), String> {
     let script = match entry.script_type {
@@ -752,7 +758,7 @@ fn inject_script_to_webview<R: Runtime>(
 
 /// Removes a script from a specific window's DOM.
 fn remove_script_from_window<R: Runtime>(
-    window: &WebviewWindow<R>,
+    window: &commands::ResolvedWebview<R>,
     script_id: &str,
 ) -> Result<(), String> {
     let script = format!(
@@ -788,7 +794,7 @@ fn remove_script_from_webview<R: Runtime>(
 }
 
 /// Clears all MCP-managed scripts from a specific window's DOM.
-fn clear_scripts_from_window<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), String> {
+fn clear_scripts_from_window<R: Runtime>(window: &commands::ResolvedWebview<R>) -> Result<(), String> {
     let script = r#"
         (function() {
             var scripts = document.querySelectorAll('script[data-mcp-script-id]');

@@ -1,4 +1,8 @@
-//! Window listing and discovery.
+//! Window and webview listing and discovery.
+//!
+//! Supports both `WebviewWindow` (combined window+webview) and standalone
+//! `Webview` instances attached to bare `Window` containers. This is needed
+//! for apps like moss that use Tauri's multi-webview architecture.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -22,39 +26,48 @@ pub struct WindowInfo {
     pub is_main: bool,
 }
 
-/// Lists all open webview windows in the application.
+/// Lists all open webview windows and standalone webviews in the application.
 ///
-/// Returns detailed information about each window including its label, title,
-/// URL, focus state, and visibility.
-///
-/// # Arguments
-///
-/// * `app` - The Tauri application handle
-///
-/// # Returns
-///
-/// * `Ok(Value)` - JSON array of WindowInfo objects
-/// * `Err(String)` - Error message if retrieval fails
-///
-/// # Examples
-///
-/// ```typescript
-/// import { invoke } from '@tauri-apps/api/core';
-///
-/// const windows = await invoke('plugin:mcp-bridge|list_windows');
-/// console.log(`Found ${windows.length} windows`);
-/// ```
+/// Enumerates both `WebviewWindow` instances and standalone `Webview`s attached
+/// to bare `Window` containers. This ensures apps using Tauri's multi-webview
+/// architecture are fully discoverable.
 #[command]
 pub async fn list_windows<R: Runtime>(app: AppHandle<R>) -> Result<Value, String> {
-    let windows = app.webview_windows();
     let mut window_list: Vec<WindowInfo> = Vec::new();
+    let mut seen_labels = std::collections::HashSet::new();
 
-    for (label, window) in windows.iter() {
+    // First: enumerate WebviewWindow instances (combined window+webview)
+    for (label, window) in app.webview_windows().iter() {
         let title = window.title().ok();
         let url = window.url().ok().map(|u| u.to_string());
         let focused = window.is_focused().unwrap_or(false);
         let visible = window.is_visible().unwrap_or(false);
         let is_main = label == "main";
+
+        seen_labels.insert(label.clone());
+        window_list.push(WindowInfo {
+            label: label.clone(),
+            title,
+            url,
+            focused,
+            visible,
+            is_main,
+        });
+    }
+
+    // Second: enumerate standalone Webview instances (not already seen)
+    for (label, webview) in app.webviews().iter() {
+        if seen_labels.contains(label) {
+            continue;
+        }
+        let url = webview.url().ok().map(|u| u.to_string());
+        // Standalone Webview doesn't have is_focused/is_visible — check parent window
+        let parent = webview.window();
+        let focused = parent.is_focused().unwrap_or(false);
+        let visible = parent.is_visible().unwrap_or(false);
+        let is_main = label == "main";
+
+        let title = parent.title().ok();
 
         window_list.push(WindowInfo {
             label: label.clone(),
@@ -92,80 +105,149 @@ pub struct WindowContext {
     pub warning: Option<String>,
 }
 
+/// A resolved webview that can execute JavaScript.
+///
+/// Wraps either a `WebviewWindow` or a standalone `Webview`, providing a
+/// uniform interface for JS execution and screenshots.
+pub enum ResolvedWebview<R: Runtime> {
+    WebviewWindow(tauri::WebviewWindow<R>),
+    Webview(tauri::Webview<R>),
+}
+
+impl<R: Runtime> ResolvedWebview<R> {
+    /// Execute JavaScript in this webview.
+    pub fn eval(&self, js: &str) -> tauri::Result<()> {
+        match self {
+            Self::WebviewWindow(w) => w.eval(js),
+            Self::Webview(w) => w.eval(js),
+        }
+    }
+
+    /// Get the label of this webview.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::WebviewWindow(w) => w.label(),
+            Self::Webview(w) => w.label(),
+        }
+    }
+
+    /// Access the platform webview handle.
+    pub fn with_webview<F: FnOnce(tauri::webview::PlatformWebview) + Send + 'static>(
+        &self,
+        f: F,
+    ) -> tauri::Result<()> {
+        match self {
+            Self::WebviewWindow(w) => w.with_webview(f),
+            Self::Webview(w) => w.with_webview(f),
+        }
+    }
+
+    /// Get the underlying WebviewWindow if this is one (needed for screenshot API).
+    pub fn as_webview_window(&self) -> Option<&tauri::WebviewWindow<R>> {
+        match self {
+            Self::WebviewWindow(w) => Some(w),
+            Self::Webview(_) => None,
+        }
+    }
+
+    /// Clone into a WebviewWindow if possible.
+    pub fn into_webview_window(self) -> Option<tauri::WebviewWindow<R>> {
+        match self {
+            Self::WebviewWindow(w) => Some(w),
+            Self::Webview(_) => None,
+        }
+    }
+}
+
 /// Result of resolving a window, including context information.
 pub struct ResolvedWindow<R: Runtime> {
-    pub window: tauri::WebviewWindow<R>,
+    pub window: ResolvedWebview<R>,
     pub context: WindowContext,
 }
 
-/// Resolves a window by label, defaulting to "main" if not specified.
-/// Returns both the window and context about the resolution.
+/// Resolves a webview by label, with smart fallback.
 ///
-/// # Arguments
-///
-/// * `app` - The Tauri application handle
-/// * `label` - Optional window label (defaults to "main")
-///
-/// # Returns
-///
-/// * `Ok(ResolvedWindow)` - The resolved window with context
-/// * `Err(String)` - Error if window not found
+/// Resolution order:
+/// 1. Try as WebviewWindow (combined window+webview)
+/// 2. Try as standalone Webview
+/// 3. If no explicit label, fall back to first available webview
 pub fn resolve_window_with_context<R: Runtime>(
     app: &AppHandle<R>,
     label: Option<String>,
 ) -> Result<ResolvedWindow<R>, String> {
-    let windows = app.webview_windows();
-    let total_windows = windows.len();
+    let total_ww = app.webview_windows().len();
+    let total_wv = app.webviews().len();
+    let total_windows = total_ww + total_wv;
+
     let explicit_label = label.is_some();
     let target_label = label.clone().unwrap_or_else(|| "main".to_string());
 
-    // Try explicit or default label first
-    let (window, actual_label) = if let Some(w) = app.get_webview_window(&target_label) {
-        (w, target_label)
-    } else if !explicit_label {
-        // No "main" window — fall back to first available
-        let (lbl, w) = windows
-            .iter()
-            .next()
-            .ok_or_else(|| "No windows available".to_string())?;
-        (w.clone(), lbl.clone())
-    } else {
-        return Err(format!("Window '{target_label}' not found"));
-    };
+    // Try as WebviewWindow first
+    if let Some(w) = app.get_webview_window(&target_label) {
+        let warning = if !explicit_label && total_windows > 1 {
+            Some(multi_window_warning(&target_label, total_windows, app))
+        } else {
+            None
+        };
+        return Ok(ResolvedWindow {
+            window: ResolvedWebview::WebviewWindow(w),
+            context: WindowContext {
+                window_label: target_label,
+                total_windows,
+                warning,
+            },
+        });
+    }
 
-    let warning = if !explicit_label && total_windows > 1 {
-        Some(format!(
-            "Multiple windows detected ({total_windows} total). Using '{actual_label}' window. \
-             Use windowId parameter to target a specific window. \
-             Available windows: {}",
-            windows.keys().cloned().collect::<Vec<_>>().join(", ")
-        ))
-    } else {
-        None
-    };
+    // Try as standalone Webview
+    if let Some(w) = app.get_webview(&target_label) {
+        let warning = if !explicit_label && total_windows > 1 {
+            Some(multi_window_warning(&target_label, total_windows, app))
+        } else {
+            None
+        };
+        return Ok(ResolvedWindow {
+            window: ResolvedWebview::Webview(w),
+            context: WindowContext {
+                window_label: target_label,
+                total_windows,
+                warning,
+            },
+        });
+    }
 
-    Ok(ResolvedWindow {
-        window,
-        context: WindowContext {
-            window_label: actual_label,
-            total_windows,
-            warning,
-        },
-    })
+    // Fall back to first available webview (only when no explicit label)
+    if !explicit_label {
+        // Prefer standalone webviews (more likely to be the app's primary content)
+        if let Some((lbl, w)) = app.webviews().iter().next() {
+            let warning = Some(multi_window_warning(lbl, total_windows, app));
+            return Ok(ResolvedWindow {
+                window: ResolvedWebview::Webview(w.clone()),
+                context: WindowContext {
+                    window_label: lbl.clone(),
+                    total_windows,
+                    warning,
+                },
+            });
+        }
+        // Then WebviewWindows
+        if let Some((lbl, w)) = app.webview_windows().iter().next() {
+            let warning = Some(multi_window_warning(lbl, total_windows, app));
+            return Ok(ResolvedWindow {
+                window: ResolvedWebview::WebviewWindow(w.clone()),
+                context: WindowContext {
+                    window_label: lbl.clone(),
+                    total_windows,
+                    warning,
+                },
+            });
+        }
+    }
+
+    Err(format!("Window '{target_label}' not found"))
 }
 
-/// Resolves a window by label, defaulting to "main" if not specified.
-/// Simple version without context (for backward compatibility).
-///
-/// # Arguments
-///
-/// * `app` - The Tauri application handle
-/// * `label` - Optional window label (defaults to "main")
-///
-/// # Returns
-///
-/// * `Ok(WebviewWindow)` - The resolved window
-/// * `Err(String)` - Error if window not found
+/// Simple resolve — returns a WebviewWindow for backward compatibility.
 pub fn resolve_window<R: Runtime>(
     app: &AppHandle<R>,
     label: Option<String>,
@@ -173,12 +255,10 @@ pub fn resolve_window<R: Runtime>(
     let explicit = label.is_some();
     let target = label.unwrap_or_else(|| "main".to_string());
 
-    // Try explicit or default label first
     if let Some(w) = app.get_webview_window(&target) {
         return Ok(w);
     }
 
-    // No "main" window — fall back to first available (only when no explicit label)
     if !explicit {
         if let Some((_, w)) = app.webview_windows().iter().next() {
             return Ok(w.clone());
@@ -186,4 +266,26 @@ pub fn resolve_window<R: Runtime>(
     }
 
     Err(format!("Window '{target}' not found"))
+}
+
+fn multi_window_warning<R: Runtime>(
+    actual_label: &str,
+    total_windows: usize,
+    app: &AppHandle<R>,
+) -> String {
+    let all_labels: Vec<String> = app
+        .webviews()
+        .keys()
+        .chain(app.webview_windows().keys())
+        .cloned()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    format!(
+        "Multiple webviews detected ({total_windows} total). Using '{actual_label}'. \
+         Use windowId parameter to target a specific webview. \
+         Available: {}",
+        all_labels.join(", ")
+    )
 }
