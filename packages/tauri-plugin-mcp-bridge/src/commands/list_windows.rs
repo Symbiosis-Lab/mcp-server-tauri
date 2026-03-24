@@ -232,21 +232,44 @@ pub fn resolve_window_with_context<R: Runtime>(
         });
     }
 
-    // Fall back to first available webview (only when no explicit label)
+    // Fall back to best available webview (only when no explicit label)
     if !explicit_label {
-        // Prefer standalone webviews (more likely to be the app's primary content)
-        if let Some((lbl, w)) = app.webviews().iter().next() {
-            let warning = Some(multi_window_warning(lbl, total_windows, app));
+        // Prefer visible webviews (the primary content), fall back to any
+        let all_webviews: Vec<(String, tauri::Webview<R>)> = app
+            .webviews()
+            .into_iter()
+            .collect();
+
+        // First pass: find a visible webview
+        for (lbl, w) in &all_webviews {
+            let visible = w.window().is_visible().unwrap_or(false);
+            if visible {
+                let warning = Some(multi_window_warning(lbl, total_windows, app));
+                return Ok(ResolvedWindow {
+                    window: ResolvedWebview::Webview(w.clone()),
+                    context: WindowContext {
+                        window_label: lbl.clone(),
+                        total_windows,
+                        warning,
+                    },
+                });
+            }
+        }
+
+        // Second pass: any webview
+        if let Some((lbl, w)) = all_webviews.into_iter().next() {
+            let warning = Some(multi_window_warning(&lbl, total_windows, app));
             return Ok(ResolvedWindow {
-                window: ResolvedWebview::Webview(w.clone()),
+                window: ResolvedWebview::Webview(w),
                 context: WindowContext {
-                    window_label: lbl.clone(),
+                    window_label: lbl,
                     total_windows,
                     warning,
                 },
             });
         }
-        // Then WebviewWindows
+
+        // Then WebviewWindows (same preference: visible first)
         if let Some((lbl, w)) = app.webview_windows().iter().next() {
             let warning = Some(multi_window_warning(lbl, total_windows, app));
             return Ok(ResolvedWindow {
