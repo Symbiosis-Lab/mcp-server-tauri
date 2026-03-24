@@ -249,9 +249,26 @@ fn prepare_script_for_native(script: &str) -> String {
         || trimmed.starts_with("return ");
 
     // For single expressions, add "return" so the IIFE returns the value.
-    // For multi-statement scripts, the script must have its own return.
+    // For multi-statement scripts, add "return" before the last statement.
     let body = if is_multi_statement {
-        trimmed.to_string()
+        // Find the last semicolon-terminated statement and prepend "return" to the
+        // final expression. This handles scripts like:
+        //   var el = document.querySelector('body'); el.textContent
+        // → var el = document.querySelector('body'); return el.textContent
+        if let Some(last_semi_pos) = trimmed.rfind(';') {
+            let (prefix, last_part) = trimmed.split_at(last_semi_pos + 1);
+            let last_part = last_part.trim();
+            if last_part.is_empty() {
+                // Trailing semicolon, try the statement before it
+                trimmed.to_string()
+            } else if last_part.starts_with("return ") {
+                trimmed.to_string()
+            } else {
+                format!("{prefix} return {last_part}")
+            }
+        } else {
+            trimmed.to_string()
+        }
     } else {
         format!("return {trimmed}")
     };
