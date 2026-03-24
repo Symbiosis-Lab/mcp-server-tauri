@@ -222,16 +222,48 @@ pub async fn execute_js_in_resolved<R: Runtime>(
 /// objects (arrays, dicts) become NSDictionary/NSArray whose `description()`
 /// is plist-like, not JSON. To guarantee correct serialization, we wrap
 /// the user's script so it always returns a JSON string.
+///
+/// Important: the wrapper must be synchronous. WKWebView's evaluateJavaScript
+/// does NOT await Promises — it returns the Promise object itself. Use a
+/// synchronous IIFE with try/catch.
 #[cfg(target_os = "macos")]
 fn prepare_script_for_native(script: &str) -> String {
     let trimmed = script.trim();
 
-    // Wrap in an async IIFE that JSON.stringify's the result.
-    // This ensures the ObjC bridge receives an NSString containing valid JSON.
+    // Detect if the script is a single expression or multi-statement
+    let has_real_semicolons = if let Some(without_trailing) = trimmed.strip_suffix(';') {
+        without_trailing.contains(';')
+    } else {
+        trimmed.contains(';')
+    };
+    let is_multi_statement = has_real_semicolons
+        || trimmed.starts_with("const ")
+        || trimmed.starts_with("let ")
+        || trimmed.starts_with("var ")
+        || trimmed.starts_with("if ")
+        || trimmed.starts_with("for ")
+        || trimmed.starts_with("while ")
+        || trimmed.starts_with("function ")
+        || trimmed.starts_with("class ")
+        || trimmed.starts_with("try ")
+        || trimmed.starts_with("return ");
+
+    // For single expressions, add "return" so the IIFE returns the value.
+    // For multi-statement scripts, the script must have its own return.
+    let body = if is_multi_statement {
+        trimmed.to_string()
+    } else {
+        format!("return {trimmed}")
+    };
+
+    // Synchronous IIFE that JSON.stringify's the result.
     format!(
-        r#"(async () => {{
+        r#"(function() {{
             try {{
-                const __result = await (async () => {{ {trimmed} }})();
+                var __result = (function() {{ {body} }})();
+                if (__result !== undefined && __result !== null && typeof __result.then === 'function') {{
+                    return JSON.stringify({{ __error: "Async scripts not supported in native eval. Wrap with await." }});
+                }}
                 return JSON.stringify(__result === undefined ? null : __result);
             }} catch (e) {{
                 return JSON.stringify({{ __error: e.message || String(e) }});
