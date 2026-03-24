@@ -83,18 +83,15 @@ async fn execute_js_native_macos<R: Runtime>(
                                 let desc = err.localizedDescription();
                                 let _ = tx.send(Err(desc.to_string()));
                             } else if !result.is_null() {
-                                // The result is a JavaScript value bridged to ObjC.
-                                // NSString for strings, NSNumber for numbers/booleans, etc.
-                                // We convert via description → JSON parse.
+                                // Result is an NSString containing JSON
+                                // (our script wrapper ensures this via JSON.stringify)
                                 let obj = &*result;
                                 let desc_ns: *mut NSString =
                                     objc2::msg_send![obj, description];
                                 if !desc_ns.is_null() {
-                                    let desc_str = (&*desc_ns).to_string();
-                                    // Try to parse as JSON first, fall back to string
-                                    let val = serde_json::from_str(&desc_str)
-                                        .unwrap_or_else(|_| Value::String(desc_str));
-                                    let _ = tx.send(Ok(val));
+                                    let json_str = (&*desc_ns).to_string();
+                                    let val = parse_json_result(&json_str);
+                                    let _ = tx.send(val);
                                 } else {
                                     let _ = tx.send(Ok(Value::Null));
                                 }
@@ -167,10 +164,9 @@ pub async fn execute_js_in_resolved<R: Runtime>(
                                 let obj = &*result;
                                 let desc_ns: *mut NSString = objc2::msg_send![obj, description];
                                 if !desc_ns.is_null() {
-                                    let desc_str = (&*desc_ns).to_string();
-                                    let val = serde_json::from_str(&desc_str)
-                                        .unwrap_or_else(|_| Value::String(desc_str));
-                                    let _ = tx.send(Ok(val));
+                                    let json_str = (&*desc_ns).to_string();
+                                    let val = parse_json_result(&json_str);
+                                    let _ = tx.send(val);
                                 } else {
                                     let _ = tx.send(Ok(Value::Null));
                                 }
@@ -192,6 +188,21 @@ pub async fn execute_js_in_resolved<R: Runtime>(
     }
 }
 
+/// Parse JSON result from the script wrapper.
+/// The wrapper always returns JSON.stringify'd output.
+/// Check for __error key to propagate script errors.
+#[cfg(target_os = "macos")]
+fn parse_json_result(json_str: &str) -> Result<Value, String> {
+    match serde_json::from_str::<Value>(json_str) {
+        Ok(Value::Object(ref obj)) if obj.contains_key("__error") => {
+            let err = obj.get("__error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+            Err(err.to_string())
+        }
+        Ok(val) => Ok(val),
+        Err(_) => Ok(Value::String(json_str.to_string())),
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 pub async fn execute_js_in_resolved<R: Runtime>(
     webview: &super::list_windows::ResolvedWebview<R>,
@@ -205,48 +216,28 @@ pub async fn execute_js_in_resolved<R: Runtime>(
     Ok(serde_json::json!({ "success": true, "data": null }))
 }
 
-/// Prepare script for native execution.
+/// Prepare script for native `evaluateJavaScript` on macOS.
 ///
-/// Native `evaluateJavaScript` returns the last expression's value directly,
-/// so we wrap multi-statement scripts in an IIFE and ensure single expressions
-/// are returned properly.
+/// WKWebView's evaluateJavaScript returns ObjC-bridged types. Complex JS
+/// objects (arrays, dicts) become NSDictionary/NSArray whose `description()`
+/// is plist-like, not JSON. To guarantee correct serialization, we wrap
+/// the user's script so it always returns a JSON string.
 #[cfg(target_os = "macos")]
 fn prepare_script_for_native(script: &str) -> String {
     let trimmed = script.trim();
 
-    // If already wrapped in IIFE or is a simple expression, use as-is
-    if trimmed.starts_with("(function")
-        || trimmed.starts_with("(async")
-        || trimmed.starts_with("(() =>")
-    {
-        return trimmed.to_string();
-    }
-
-    // Multi-statement scripts need IIFE wrapping
-    let has_real_semicolons = if let Some(without_trailing) = trimmed.strip_suffix(';') {
-        without_trailing.contains(';')
-    } else {
-        trimmed.contains(';')
-    };
-
-    let is_multi_statement = has_real_semicolons
-        || trimmed.starts_with("const ")
-        || trimmed.starts_with("let ")
-        || trimmed.starts_with("var ")
-        || trimmed.starts_with("if ")
-        || trimmed.starts_with("for ")
-        || trimmed.starts_with("while ")
-        || trimmed.starts_with("function ")
-        || trimmed.starts_with("class ")
-        || trimmed.starts_with("try ");
-
-    if is_multi_statement {
-        // Wrap in async IIFE so await works
-        format!("(async () => {{ {trimmed} }})()")
-    } else {
-        // Single expression — evaluateJavaScript returns its value directly
-        trimmed.to_string()
-    }
+    // Wrap in an async IIFE that JSON.stringify's the result.
+    // This ensures the ObjC bridge receives an NSString containing valid JSON.
+    format!(
+        r#"(async () => {{
+            try {{
+                const __result = await (async () => {{ {trimmed} }})();
+                return JSON.stringify(__result === undefined ? null : __result);
+            }} catch (e) {{
+                return JSON.stringify({{ __error: e.message || String(e) }});
+            }}
+        }})()"#
+    )
 }
 
 /// Fallback: eval + event roundtrip (works on non-macOS platforms).

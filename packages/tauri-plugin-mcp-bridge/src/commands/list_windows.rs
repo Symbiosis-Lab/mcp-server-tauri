@@ -40,7 +40,8 @@ pub async fn list_windows<R: Runtime>(app: AppHandle<R>) -> Result<Value, String
     let ww_count = app.webview_windows().len();
     let wv_count = app.webviews().len();
     let w_count = app.windows().len();
-    eprintln!("[MCP][LIST_WINDOWS] webview_windows={ww_count}, webviews={wv_count}, windows={w_count}");
+    let app_id = app.config().identifier.clone();
+    eprintln!("[MCP][LIST_WINDOWS] app={app_id} webview_windows={ww_count}, webviews={wv_count}, windows={w_count}");
     for (label, _) in app.webview_windows().iter() {
         eprintln!("[MCP][LIST_WINDOWS]   webview_window: {label}");
     }
