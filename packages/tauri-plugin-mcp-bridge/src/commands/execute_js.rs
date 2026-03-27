@@ -30,10 +30,11 @@ use uuid::Uuid;
 ///   - `data`: The result of the script execution (if successful)
 ///   - `error`: Error message (if failed)
 #[command]
+#[allow(unused_variables)]
 pub async fn execute_js<R: Runtime>(
     window: WebviewWindow<R>,
     script: String,
-    _state: State<'_, ScriptExecutor>,
+    state: State<'_, ScriptExecutor>,
 ) -> Result<Value, String> {
     #[cfg(target_os = "macos")]
     {
