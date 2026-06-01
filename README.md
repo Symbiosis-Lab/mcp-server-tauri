@@ -292,6 +292,13 @@ See [specs/releasing.md](./specs/releasing.md) for details.
 - **[MCP Server Package](./packages/mcp-server/)** — Server implementation details
 - **[MCP Bridge Plugin](./packages/tauri-plugin-mcp-bridge/)** — Tauri plugin documentation
 
+**In this repo:**
+
+- [docs/guides/](./docs/guides/) — Usage guides (tool reference, suggested prompts)
+- [docs/api/](./docs/api/) — API reference
+- [specs/architecture.md](./specs/architecture.md) — Architecture overview
+- [specs/releasing.md](./specs/releasing.md) — Release process
+
 ---
 
 ## 🤝 Contributing
