@@ -45,3 +45,5 @@ ai.json
 
 # Test artifacts
 packages/mcp-server/.test-app-port
+
+.worktrees/
