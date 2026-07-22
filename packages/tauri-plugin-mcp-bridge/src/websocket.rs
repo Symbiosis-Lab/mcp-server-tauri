@@ -481,7 +481,7 @@ fn handle_remove_script<R: Runtime>(app: &AppHandle<R>, id: &str, args: &Value) 
             }
         }),
         Err(e) => {
-            eprintln!("Failed to remove script from DOM: {e}");
+            mcp_log_error("SCRIPT", &format!("Failed to remove script from DOM: {e}"));
             serde_json::json!({
                 "id": id,
                 "success": true,
@@ -520,7 +520,7 @@ fn handle_clear_scripts<R: Runtime>(app: &AppHandle<R>, id: &str, command: &Valu
             }
         }),
         Err(e) => {
-            eprintln!("Failed to clear scripts from DOM: {e}");
+            mcp_log_error("SCRIPT", &format!("Failed to clear scripts from DOM: {e}"));
             serde_json::json!({
                 "id": id,
                 "success": true,
@@ -645,13 +645,13 @@ async fn handle_connection<R: Runtime>(
             tokio::select! {
                 Ok(msg) = event_rx.recv() => {
                     if let Err(e) = ws_sender.send(Message::Text(msg.into())).await {
-                        eprintln!("Failed to send broadcast: {e}");
+                        mcp_log_error("WS", &format!("Failed to send broadcast: {e}"));
                         break;
                     }
                 }
                 Some(response) = response_rx.recv() => {
                     if let Err(e) = ws_sender.send(Message::Text(response.into())).await {
-                        eprintln!("Failed to send response: {e}");
+                        mcp_log_error("WS", &format!("Failed to send response: {e}"));
                         break;
                     }
                 }
@@ -667,15 +667,15 @@ async fn handle_connection<R: Runtime>(
                     let response = dispatch_command(&app, &command).await;
                     let _ = response_tx.send(response.to_string());
                 } else {
-                    eprintln!("Failed to parse command: {text}");
+                    mcp_log_error("WS", &format!("Failed to parse command: {text}"));
                 }
             }
             Ok(Message::Close(_)) => {
-                println!("Client disconnected");
+                mcp_log_info("WS", "Client disconnected");
                 break;
             }
             Err(e) => {
-                eprintln!("WebSocket error: {e}");
+                mcp_log_error("WS", &format!("WebSocket error: {e}"));
                 break;
             }
             _ => {}
