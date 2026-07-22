@@ -95,7 +95,7 @@ describe('Session Manager Unit Tests', () => {
    });
 
    describe('findSessionByCwd', () => {
-      // Build a minimal SessionInfo from just the cwd + port fields findSessionByCwd reads.
+      // Build a minimal SessionInfo from the cwd + port fields findSessionByCwd reads.
       // The other fields are present in the type but never inspected by this function.
       function fakeSession(port: number, cwd: string | null): unknown {
          return { name: `app-${port}`, identifier: null, cwd, host: 'localhost', port, client: null, connected: true };
@@ -163,7 +163,7 @@ describe('Session Manager Unit Tests', () => {
          const { findSessionByCwd } = await import('../../src/driver/session-manager');
 
          const sessions = [
-            fakeSession(9223, '/Users/me/workspace'),                          // ancestor (score=18)
+            fakeSession(9223, '/Users/me/workspace'), // ancestor (score=18)
             fakeSession(9224, '/Users/me/workspace/moss/.worktrees/feature-x'), // exact (score=50)
          ];
 

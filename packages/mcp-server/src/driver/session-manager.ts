@@ -42,6 +42,7 @@ export const ManageDriverSessionSchema = z.object({
 export interface SessionInfo {
    name: string;
    identifier: string | null;
+
    /**
     * Working directory of the host Tauri process at session-start time.
     * `null` when the plugin is too old to advertise it (pre-v0.11) or
@@ -141,11 +142,13 @@ export function findSessionByCwd(
       return null;
    }
 
-   let best: SessionInfo | null = null;
-   let bestScore = -1;
+   let best: SessionInfo | null = null,
+       bestScore = -1;
 
    for (const session of sessions) {
-      if (!session.cwd) continue;
+      if (!session.cwd) {
+         continue;
+      }
 
       let score = -1;
 
@@ -492,7 +495,7 @@ async function fetchAppMetadata(
          identifier: state.app?.identifier ?? null,
          cwd: typeof state.cwd === 'string' && state.cwd.length > 0 ? state.cwd : null,
       };
-   } catch {
+   } catch{
       return { identifier: null, cwd: null };
    }
 }

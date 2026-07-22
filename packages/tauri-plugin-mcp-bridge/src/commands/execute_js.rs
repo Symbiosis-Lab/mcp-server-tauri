@@ -76,37 +76,31 @@ async fn execute_js_native_macos<R: Runtime>(
                 let ns_script = NSString::from_str(&prepared);
 
                 let tx_clone = tx.clone();
-                let handler =
-                    RcBlock::new(move |result: *mut AnyObject, error: *mut NSError| {
-                        if let Some(tx) = tx_clone.lock().unwrap().take() {
-                            if !error.is_null() {
-                                let err = &*error;
-                                let desc = err.localizedDescription();
-                                let _ = tx.send(Err(desc.to_string()));
-                            } else if !result.is_null() {
-                                // Result is an NSString containing JSON
-                                // (our script wrapper ensures this via JSON.stringify)
-                                let obj = &*result;
-                                let desc_ns: *mut NSString =
-                                    objc2::msg_send![obj, description];
-                                if !desc_ns.is_null() {
-                                    let json_str = (&*desc_ns).to_string();
-                                    let val = parse_json_result(&json_str);
-                                    let _ = tx.send(val);
-                                } else {
-                                    let _ = tx.send(Ok(Value::Null));
-                                }
+                let handler = RcBlock::new(move |result: *mut AnyObject, error: *mut NSError| {
+                    if let Some(tx) = tx_clone.lock().unwrap().take() {
+                        if !error.is_null() {
+                            let err = &*error;
+                            let desc = err.localizedDescription();
+                            let _ = tx.send(Err(desc.to_string()));
+                        } else if !result.is_null() {
+                            // Result is an NSString containing JSON
+                            // (our script wrapper ensures this via JSON.stringify)
+                            let obj = &*result;
+                            let desc_ns: *mut NSString = objc2::msg_send![obj, description];
+                            if !desc_ns.is_null() {
+                                let json_str = (&*desc_ns).to_string();
+                                let val = parse_json_result(&json_str);
+                                let _ = tx.send(val);
                             } else {
                                 let _ = tx.send(Ok(Value::Null));
                             }
+                        } else {
+                            let _ = tx.send(Ok(Value::Null));
                         }
-                    });
+                    }
+                });
 
-                wkwebview
-                    .evaluateJavaScript_completionHandler(
-                        &ns_script,
-                        Some(&handler),
-                    );
+                wkwebview.evaluateJavaScript_completionHandler(&ns_script, Some(&handler));
             }
         })
         .map_err(|e| format!("Failed to access webview: {e}"))?;
@@ -148,44 +142,43 @@ pub async fn execute_js_in_resolved<R: Runtime>(
     let tx = Arc::new(Mutex::new(Some(tx)));
 
     webview
-        .with_webview(move |wv| {
-            unsafe {
-                let wkwebview: &WKWebView = &*(wv.inner() as *const _ as *const WKWebView);
-                let ns_script = NSString::from_str(&prepared);
+        .with_webview(move |wv| unsafe {
+            let wkwebview: &WKWebView = &*(wv.inner() as *const _ as *const WKWebView);
+            let ns_script = NSString::from_str(&prepared);
 
-                let tx_clone = tx.clone();
-                let handler =
-                    RcBlock::new(move |result: *mut AnyObject, error: *mut NSError| {
-                        if let Some(tx) = tx_clone.lock().unwrap().take() {
-                            if !error.is_null() {
-                                let err = &*error;
-                                let desc = err.localizedDescription();
-                                let _ = tx.send(Err(desc.to_string()));
-                            } else if !result.is_null() {
-                                let obj = &*result;
-                                let desc_ns: *mut NSString = objc2::msg_send![obj, description];
-                                if !desc_ns.is_null() {
-                                    let json_str = (&*desc_ns).to_string();
-                                    let val = parse_json_result(&json_str);
-                                    let _ = tx.send(val);
-                                } else {
-                                    let _ = tx.send(Ok(Value::Null));
-                                }
-                            } else {
-                                let _ = tx.send(Ok(Value::Null));
-                            }
+            let tx_clone = tx.clone();
+            let handler = RcBlock::new(move |result: *mut AnyObject, error: *mut NSError| {
+                if let Some(tx) = tx_clone.lock().unwrap().take() {
+                    if !error.is_null() {
+                        let err = &*error;
+                        let desc = err.localizedDescription();
+                        let _ = tx.send(Err(desc.to_string()));
+                    } else if !result.is_null() {
+                        let obj = &*result;
+                        let desc_ns: *mut NSString = objc2::msg_send![obj, description];
+                        if !desc_ns.is_null() {
+                            let json_str = (&*desc_ns).to_string();
+                            let val = parse_json_result(&json_str);
+                            let _ = tx.send(val);
+                        } else {
+                            let _ = tx.send(Ok(Value::Null));
                         }
-                    });
+                    } else {
+                        let _ = tx.send(Ok(Value::Null));
+                    }
+                }
+            });
 
-                wkwebview.evaluateJavaScript_completionHandler(&ns_script, Some(&handler));
-            }
+            wkwebview.evaluateJavaScript_completionHandler(&ns_script, Some(&handler));
         })
         .map_err(|e| format!("Failed to access webview: {e}"))?;
 
     match rx.recv_timeout(std::time::Duration::from_secs(10)) {
         Ok(Ok(data)) => Ok(serde_json::json!({ "success": true, "data": data })),
         Ok(Err(error)) => Ok(serde_json::json!({ "success": false, "error": error })),
-        Err(_) => Ok(serde_json::json!({ "success": false, "error": "Script execution timeout (10s)" })),
+        Err(_) => {
+            Ok(serde_json::json!({ "success": false, "error": "Script execution timeout (10s)" }))
+        }
     }
 }
 
@@ -196,7 +189,10 @@ pub async fn execute_js_in_resolved<R: Runtime>(
 fn parse_json_result(json_str: &str) -> Result<Value, String> {
     match serde_json::from_str::<Value>(json_str) {
         Ok(Value::Object(ref obj)) if obj.contains_key("__error") => {
-            let err = obj.get("__error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+            let err = obj
+                .get("__error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown error");
             Err(err.to_string())
         }
         Ok(val) => Ok(val),
@@ -211,7 +207,9 @@ pub async fn execute_js_in_resolved<R: Runtime>(
 ) -> Result<Value, String> {
     // On non-macOS, use eval (the event roundtrip won't work without a command context)
     // For basic expression evaluation, eval + polling is used
-    webview.eval(script).map_err(|e| format!("eval failed: {e}"))?;
+    webview
+        .eval(script)
+        .map_err(|e| format!("eval failed: {e}"))?;
     // Note: without the event roundtrip, we can't get the return value on non-macOS
     // from a standalone Webview. Return success with null data.
     Ok(serde_json::json!({ "success": true, "data": null }))

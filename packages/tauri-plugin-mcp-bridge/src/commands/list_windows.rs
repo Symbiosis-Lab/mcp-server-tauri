@@ -219,10 +219,7 @@ pub fn resolve_window_with_context<R: Runtime>(
     // Fall back to best available webview (only when no explicit label)
     if !explicit_label {
         // Prefer visible webviews (the primary content), fall back to any
-        let all_webviews: Vec<(String, tauri::Webview<R>)> = app
-            .webviews()
-            .into_iter()
-            .collect();
+        let all_webviews: Vec<(String, tauri::Webview<R>)> = app.webviews().into_iter().collect();
 
         // First pass: find a visible webview
         for (lbl, w) in &all_webviews {

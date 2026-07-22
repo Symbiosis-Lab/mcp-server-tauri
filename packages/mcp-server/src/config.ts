@@ -59,7 +59,7 @@ export function getCwdHint(): string | null {
    }
    try {
       return process.cwd();
-   } catch {
+   } catch{
       return null;
    }
 }

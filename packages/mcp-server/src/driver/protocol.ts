@@ -129,6 +129,7 @@ export interface BackendState {
       visible: boolean;
    }>;
    window_count: number;
+
    /**
     * Working directory of the host Tauri process. Optional for backward
     * compat with plugin versions before this field was added. Used by the

@@ -290,23 +290,21 @@ async fn handle_execute_js<R: Runtime>(app: &AppHandle<R>, id: &str, args: &Valu
         .map(|s| s.to_string());
 
     match resolve_window_with_context(app, window_label) {
-        Ok(resolved) => {
-            match commands::execute_js_in_resolved(&resolved.window, script).await {
-                Ok(result) => serde_json::json!({
-                    "id": id,
-                    "success": result.get("success").and_then(|v| v.as_bool()).unwrap_or(true),
-                    "data": result.get("data").cloned(),
-                    "error": result.get("error").and_then(|v| v.as_str()),
-                    "windowContext": resolved.context
-                }),
-                Err(e) => serde_json::json!({
-                    "id": id,
-                    "success": false,
-                    "error": e,
-                    "windowContext": resolved.context
-                }),
-            }
-        }
+        Ok(resolved) => match commands::execute_js_in_resolved(&resolved.window, script).await {
+            Ok(result) => serde_json::json!({
+                "id": id,
+                "success": result.get("success").and_then(|v| v.as_bool()).unwrap_or(true),
+                "data": result.get("data").cloned(),
+                "error": result.get("error").and_then(|v| v.as_str()),
+                "windowContext": resolved.context
+            }),
+            Err(e) => serde_json::json!({
+                "id": id,
+                "success": false,
+                "error": e,
+                "windowContext": resolved.context
+            }),
+        },
         Err(e) => error_response(id, e),
     }
 }
@@ -345,9 +343,7 @@ async fn handle_capture_screenshot<R: Runtime>(
                     "windowContext": resolved.context
                 });
             };
-            match commands::capture_native_screenshot(ww, format, quality, max_width)
-                .await
-            {
+            match commands::capture_native_screenshot(ww, format, quality, max_width).await {
                 Ok(data_url) => serde_json::json!({
                     "id": id,
                     "success": true,
@@ -794,7 +790,9 @@ fn remove_script_from_webview<R: Runtime>(
 }
 
 /// Clears all MCP-managed scripts from a specific window's DOM.
-fn clear_scripts_from_window<R: Runtime>(window: &commands::ResolvedWebview<R>) -> Result<(), String> {
+fn clear_scripts_from_window<R: Runtime>(
+    window: &commands::ResolvedWebview<R>,
+) -> Result<(), String> {
     let script = r#"
         (function() {
             var scripts = document.querySelectorAll('script[data-mcp-script-id]');
